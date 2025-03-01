@@ -57,11 +57,13 @@
     <div>📜: <span id="paperCount">0</span></div>
     <div>✂️: <span id="scissorsCount">0</span></div>
   </div>
+
+  <!-- Settings toggle + panel, but now this will generate a link with URL params instead of applying locally. -->
   <button id="settingsToggle">Settings</button>
   <div id="settingsPanel">
     <label>
       Items per Type:
-      <input type="number" id="numItems" value="50" min="1" max="500">
+      <input type="number" id="numItems" value="500" min="1" max="1000">
     </label>
     <label>
       Acceleration:
@@ -71,37 +73,89 @@
       Max Speed:
       <input type="number" id="maxSpeedInput" value="5.0" step="0.1" min="0.1">
     </label>
+    <label>
+      Use Trails?
+      <input type="checkbox" id="useTrails" checked>
+    </label>
     <button id="applySettings">Apply</button>
   </div>
+
   <script type="module">
+    // 1) Parse settings from URL parameters.
+    const params = new URLSearchParams(window.location.search);
+
+    // fallback if not found or invalid
+    function parseOrDefault(name, def) {
+      const val = params.get(name);
+      if (val === null) return def;
+      const num = parseFloat(val);
+      if (Number.isNaN(num)) return def;
+      return num;
+    }
+
+    // Items per type
+    let currentNumPerType = parseInt(params.get('items') || '500');
+    if (isNaN(currentNumPerType) || currentNumPerType < 1) {
+      currentNumPerType = 500;
+    }
+
+    // Acceleration
+    let currentAcceleration = parseOrDefault('acc', 0.1);
+    if (currentAcceleration <= 0) {
+      currentAcceleration = 0.1;
+    }
+
+    // Max speed
+    let currentMaxSpeed = parseOrDefault('speed', 5.0);
+    if (currentMaxSpeed <= 0) {
+      currentMaxSpeed = 5.0;
+    }
+
+    // Trails toggle, param is "trails"=1 or 0
+    let useTrails = true;
+    const trailsParam = params.get('trails');
+    if (trailsParam !== null) {
+      useTrails = (trailsParam !== '0'); // anything other than '0' = true
+    }
+
     let animationFrameId;
     let simulationActive = false;
-    // Default settings:
-    let currentNumPerType = 500;
-    let currentAcceleration = 0.1;
-    let currentMaxSpeed = 5.0;
-
     let device; // global GPU device
+    let endTimerId = null; // for single-type end condition
 
-    // Toggle settings panel.
-    document.getElementById("settingsToggle").addEventListener("click", () => {
-      const panel = document.getElementById("settingsPanel");
-      panel.style.display = (panel.style.display === "none" || panel.style.display === "") ? "block" : "none";
+    // 2) Hide or show settings panel. We'll fill the inputs with the current values.
+    const settingsToggle = document.getElementById("settingsToggle");
+    const settingsPanel = document.getElementById("settingsPanel");
+
+    settingsToggle.addEventListener("click", () => {
+      settingsPanel.style.display = (settingsPanel.style.display === "none" || settingsPanel.style.display === "")
+        ? "block"
+        : "none";
+      // fill the fields from our current settings
+      document.getElementById("numItems").value = currentNumPerType;
+      document.getElementById("accelerationInput").value = currentAcceleration;
+      document.getElementById("maxSpeedInput").value = currentMaxSpeed;
+      document.getElementById("useTrails").checked = useTrails;
     });
 
-    // Apply new settings, then restart.
+    // 3) The panel's "Apply" button navigates to a new URL with the chosen params.
     document.getElementById("applySettings").addEventListener("click", () => {
-      const numInput = parseInt(document.getElementById("numItems").value);
-      const accInput = parseFloat(document.getElementById("accelerationInput").value);
-      const maxSpeedInput = parseFloat(document.getElementById("maxSpeedInput").value);
+      const num = parseInt(document.getElementById("numItems").value);
+      const acc = parseFloat(document.getElementById("accelerationInput").value);
+      const speed = parseFloat(document.getElementById("maxSpeedInput").value);
+      const hasTrails = document.getElementById("useTrails").checked;
+      // build new query string
+      const newParams = new URLSearchParams();
+      newParams.set('items', String(num > 0 ? num : 500));
+      newParams.set('acc', String(acc > 0 ? acc : 0.1));
+      newParams.set('speed', String(speed > 0 ? speed : 5.0));
+      newParams.set('trails', hasTrails ? '1' : '0');
 
-      if (numInput > 0 && accInput > 0 && maxSpeedInput > 0) {
-        currentNumPerType = numInput;
-        currentAcceleration = accInput;
-        currentMaxSpeed = maxSpeedInput;
-        restartSimulation();
-      }
+      // navigate
+      window.location.href = window.location.pathname + '?' + newParams.toString();
     });
+
+    // 4) Start the simulation with the parameters we extracted.
 
     async function initSimulation(numPerType) {
       simulationActive = true;
@@ -352,6 +406,8 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
               const typeI = updatedData[indexI + 4];
               const typeJ = updatedData[indexJ + 4];
               if (typeI === typeJ) continue;
+              // Rock beats Scissors, Paper beats Rock, Scissors beat Paper
+              // if I beats J, convert J to I
               if ((typeI === 0 && typeJ === 2) ||
                   (typeI === 1 && typeJ === 0) ||
                   (typeI === 2 && typeJ === 1)) {
@@ -365,6 +421,7 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
 
         device.queue.writeBuffer(npcBuffer, 0, updatedData.buffer, updatedData.byteOffset, updatedData.byteLength);
 
+        // Count current types
         let rockCount = 0;
         let paperCount = 0;
         let scissorsCount = 0;
@@ -380,10 +437,15 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
         document.getElementById("paperCount").textContent = paperCount;
         document.getElementById("scissorsCount").textContent = scissorsCount;
 
-        // Trails
-        ctx.fillStyle = 'rgba(51,51,51,0.2)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // If trails are enabled, do partial fill, else do a full clear.
+        if (useTrails) {
+          ctx.fillStyle = 'rgba(51,51,51,0.2)';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        } else {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
 
+        // Draw all emojis
         for (let i = 0; i < totalNPCs; i++) {
           const idx = i * npcStride;
           if (updatedData[idx + 5] < 0.5) continue;
@@ -401,6 +463,26 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
           ctx.fillText(emojiForType[type], x, y);
         }
 
+        // Single-type check
+        const typesLeft = [rockCount > 0, paperCount > 0, scissorsCount > 0].filter(Boolean).length;
+        if (typesLeft === 1) {
+          if (!endTimerId) {
+            endTimerId = setTimeout(() => {
+              // Double check.
+              const stillOneType = ([rockCount, paperCount, scissorsCount].filter(c => c > 0).length === 1);
+              if (stillOneType && simulationActive) {
+                restartSimulation();
+              }
+              endTimerId = null;
+            }, 5000);
+          }
+        } else {
+          if (endTimerId) {
+            clearTimeout(endTimerId);
+            endTimerId = null;
+          }
+        }
+
         animationFrameId = requestAnimationFrame(frame);
       }
 
@@ -415,11 +497,17 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
       const canvas = document.getElementById("canvas");
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (endTimerId) {
+        clearTimeout(endTimerId);
+        endTimerId = null;
+      }
+
       initSimulation(currentNumPerType);
     }
 
+    // Finally, start with the parsed settings.
     initSimulation(currentNumPerType);
   </script>
 </body>
 </html>
-	
