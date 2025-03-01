@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WebGPU RPS Simulation with Acceleration & Bouncy Walls</title>
+  <style>
+    html, body {
+      margin: 0;
+      overflow: hidden;
+      background: #222;
+      color: #fff;
+      font-family: sans-serif;
+    }
+    canvas {
+      display: block;
+      background: #333;
+    }
+    #scoreboard {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 10px;
+      border-radius: 5px;
+    }
+    #settingsPanel {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 5px;
+      display: none;
+    }
+    #settingsToggle {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.8);
+      color: #fff;
+      border: none;
+      padding: 5px 10px;
+      cursor: pointer;
+      border-radius: 5px;
+      z-index: 1;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="scoreboard">
+    <div>🪨: <span id="rockCount">0</span></div>
+    <div>📜: <span id="paperCount">0</span></div>
+    <div>✂️: <span id="scissorsCount">0</span></div>
+  </div>
+  <button id="settingsToggle">Settings</button>
+  <div id="settingsPanel">
+    <label>
+      Items per Type:
+      <input type="number" id="numItems" value="50" min="1" max="500">
+    </label>
+    <label>
+      Acceleration:
+      <input type="number" id="accelerationInput" value="0.1" step="0.01" min="0.01">
+    </label>
+    <label>
+      Max Speed:
+      <input type="number" id="maxSpeedInput" value="5.0" step="0.1" min="0.1">
+    </label>
+    <button id="applySettings">Apply</button>
+  </div>
+  <script type="module">
+    let animationFrameId;
+    let simulationActive = false;
+    // Default settings:
+    let currentNumPerType = 500;
+    let currentAcceleration = 0.1;
+    let currentMaxSpeed = 5.0;
+
+    let device; // global GPU device
+
+    // Toggle settings panel.
+    document.getElementById("settingsToggle").addEventListener("click", () => {
+      const panel = document.getElementById("settingsPanel");
+      panel.style.display = (panel.style.display === "none" || panel.style.display === "") ? "block" : "none";
+    });
+
+    // Apply new settings, then restart.
+    document.getElementById("applySettings").addEventListener("click", () => {
+      const numInput = parseInt(document.getElementById("numItems").value);
+      const accInput = parseFloat(document.getElementById("accelerationInput").value);
+      const maxSpeedInput = parseFloat(document.getElementById("maxSpeedInput").value);
+
+      if (numInput > 0 && accInput > 0 && maxSpeedInput > 0) {
+        currentNumPerType = numInput;
+        currentAcceleration = accInput;
+        currentMaxSpeed = maxSpeedInput;
+        restartSimulation();
+      }
+    });
+
+    async function initSimulation(numPerType) {
+      simulationActive = true;
+
+      if (!navigator.gpu) {
+        console.error("WebGPU is not supported on this browser.");
+        return;
+      }
+      const adapter = await navigator.gpu.requestAdapter();
+      device = await adapter.requestDevice();
+
+      const canvas = document.getElementById("canvas");
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      const collisionDist = 15.0;
+      const npcStride = 6; // [pos.x, pos.y, vel.x, vel.y, npcType, alive]
+      const totalNPCs = numPerType * 3;
+      const npcData = new Float32Array(totalNPCs * npcStride);
+
+      for (let i = 0; i < totalNPCs; i++) {
+        const index = i * npcStride;
+        npcData[index + 0] = Math.random() * canvas.width;  // pos.x
+        npcData[index + 1] = Math.random() * canvas.height; // pos.y
+        npcData[index + 2] = 0.0; // vel.x
+        npcData[index + 3] = 0.0; // vel.y
+        if (i < numPerType) {
+          npcData[index + 4] = 0; // Rock
+        } else if (i < 2 * numPerType) {
+          npcData[index + 4] = 1; // Paper
+        } else {
+          npcData[index + 4] = 2; // Scissors
+        }
+        npcData[index + 5] = 1.0; // alive
+      }
+
+      const npcBuffer = device.createBuffer({
+        size: npcData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+        mappedAtCreation: true
+      });
+      new Float32Array(npcBuffer.getMappedRange()).set(npcData);
+      npcBuffer.unmap();
+
+      // Uniform data: [totalNPCs, canvasWidth, canvasHeight, acceleration, maxSpeed, collisionDist]
+      const uniformData = new Float32Array([
+        totalNPCs,
+        canvas.width,
+        canvas.height,
+        currentAcceleration,
+        currentMaxSpeed,
+        collisionDist
+      ]);
+      const uniformBuffer = device.createBuffer({
+        size: uniformData.byteLength,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      device.queue.writeBuffer(uniformBuffer, 0, uniformData.buffer, uniformData.byteOffset, uniformData.byteLength);
+
+      // WGSL compute shader
+      const computeShaderCode = `
+struct NPC {
+  pos : vec2<f32>,
+  vel : vec2<f32>,
+  npcType : f32,
+  alive : f32,
+};
+
+struct NPCBuffer {
+  data : array<NPC>,
+};
+
+@group(0) @binding(0) var<storage, read_write> npcs : NPCBuffer;
+
+struct Params {
+  totalNPCs : f32,
+  canvasWidth : f32,
+  canvasHeight : f32,
+  acceleration : f32,
+  maxSpeed : f32,
+  collisionDist : f32,
+};
+@group(0) @binding(1) var<uniform> params : Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
+  let i = global_id.x;
+  if (f32(i) >= params.totalNPCs) {
+    return;
+  }
+
+  var npc = npcs.data[i];
+  if (npc.alive < 0.5) {
+    return;
+  }
+
+  // Predator/prey
+  var predatorType: f32;
+  var preyType: f32;
+  if (npc.npcType == 0.0) {
+    predatorType = 1.0; // Paper beats Rock.
+    preyType = 2.0;     // Rock beats Scissors.
+  } else if (npc.npcType == 1.0) {
+    predatorType = 2.0; // Scissors beat Paper.
+    preyType = 0.0;     // Paper beats Rock.
+  } else {
+    predatorType = 0.0; // Rock beats Scissors.
+    preyType = 1.0;     // Scissors beat Paper.
+  }
+
+  var bestPredatorDist = 1e10;
+  var predatorDX = 0.0;
+  var predatorDY = 0.0;
+  var bestPreyDist = 1e10;
+  var preyDX = 0.0;
+  var preyDY = 0.0;
+
+  for (var j: u32 = 0u; j < u32(params.totalNPCs); j = j + 1u) {
+    let other = npcs.data[j];
+    if (other.alive < 0.5) {
+      continue;
+    }
+    let dx = other.pos.x - npc.pos.x;
+    let dy = other.pos.y - npc.pos.y;
+    let dist = dx * dx + dy * dy;
+    if (other.npcType == predatorType) {
+      if (dist < bestPredatorDist) {
+        bestPredatorDist = dist;
+        predatorDX = dx;
+        predatorDY = dy;
+      }
+    } else if (other.npcType == preyType) {
+      if (dist < bestPreyDist) {
+        bestPreyDist = dist;
+        preyDX = dx;
+        preyDY = dy;
+      }
+    }
+  }
+
+  var dir = vec2<f32>(0.0, 0.0);
+  if (bestPredatorDist < bestPreyDist) {
+    let mag = sqrt(predatorDX * predatorDX + predatorDY * predatorDY);
+    if (mag > 0.0) {
+      dir = vec2<f32>(-predatorDX / mag, -predatorDY / mag);
+    }
+  } else if (bestPreyDist < 1e10) {
+    let mag = sqrt(preyDX * preyDX + preyDY * preyDY);
+    if (mag > 0.0) {
+      dir = vec2<f32>(preyDX / mag, preyDY / mag);
+    }
+  }
+
+  // Accelerate
+  npc.vel = npc.vel + dir * params.acceleration;
+  let speed = sqrt(npc.vel.x * npc.vel.x + npc.vel.y * npc.vel.y);
+  if (speed > params.maxSpeed) {
+    npc.vel = (npc.vel / speed) * params.maxSpeed;
+  }
+
+  // Position
+  npc.pos = npc.pos + npc.vel;
+
+  // Bouncy walls
+  if (npc.pos.x < 0.0) {
+    npc.pos.x = 0.0;
+    npc.vel.x = -npc.vel.x;
+  } else if (npc.pos.x > params.canvasWidth) {
+    npc.pos.x = params.canvasWidth;
+    npc.vel.x = -npc.vel.x;
+  }
+  if (npc.pos.y < 0.0) {
+    npc.pos.y = 0.0;
+    npc.vel.y = -npc.vel.y;
+  } else if (npc.pos.y > params.canvasHeight) {
+    npc.pos.y = params.canvasHeight;
+    npc.vel.y = -npc.vel.y;
+  }
+
+  npcs.data[i] = npc;
+}
+`;
+
+      const shaderModule = device.createShaderModule({ code: computeShaderCode });
+      const computePipeline = device.createComputePipeline({
+        layout: "auto",
+        compute: { module: shaderModule, entryPoint: "main" }
+      });
+
+      const bindGroup = device.createBindGroup({
+        layout: computePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: npcBuffer } },
+          { binding: 1, resource: { buffer: uniformBuffer } }
+        ]
+      });
+
+      const readBuffer = device.createBuffer({
+        size: npcData.byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+
+      const ctx = canvas.getContext("2d");
+      ctx.font = "20px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const emojiForType = {
+        0: "🪨",
+        1: "📜",
+        2: "✂️"
+      };
+
+      async function frame() {
+        if (!simulationActive) return;
+
+        const commandEncoder = device.createCommandEncoder();
+        const passEncoder = commandEncoder.beginComputePass();
+        passEncoder.setPipeline(computePipeline);
+        passEncoder.setBindGroup(0, bindGroup);
+        const workgroupCount = Math.ceil(totalNPCs / 64);
+        passEncoder.dispatchWorkgroups(workgroupCount);
+        passEncoder.end();
+
+        commandEncoder.copyBufferToBuffer(npcBuffer, 0, readBuffer, 0, npcData.byteLength);
+        device.queue.submit([commandEncoder.finish()]);
+
+        await readBuffer.mapAsync(GPUMapMode.READ);
+        if (!simulationActive) {
+          readBuffer.unmap();
+          return;
+        }
+
+        const arrayBuffer = readBuffer.getMappedRange();
+        const updatedData = new Float32Array(arrayBuffer.slice(0));
+        readBuffer.unmap();
+
+        // CPU collision & conversion.
+        for (let i = 0; i < totalNPCs; i++) {
+          const indexI = i * npcStride;
+          if (updatedData[indexI + 5] < 0.5) continue;
+          for (let j = i + 1; j < totalNPCs; j++) {
+            const indexJ = j * npcStride;
+            if (updatedData[indexJ + 5] < 0.5) continue;
+            const dx = updatedData[indexI] - updatedData[indexJ];
+            const dy = updatedData[indexI + 1] - updatedData[indexJ + 1];
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < collisionDist) {
+              const typeI = updatedData[indexI + 4];
+              const typeJ = updatedData[indexJ + 4];
+              if (typeI === typeJ) continue;
+              if ((typeI === 0 && typeJ === 2) ||
+                  (typeI === 1 && typeJ === 0) ||
+                  (typeI === 2 && typeJ === 1)) {
+                updatedData[indexJ + 4] = typeI;
+              } else {
+                updatedData[indexI + 4] = typeJ;
+              }
+            }
+          }
+        }
+
+        device.queue.writeBuffer(npcBuffer, 0, updatedData.buffer, updatedData.byteOffset, updatedData.byteLength);
+
+        let rockCount = 0;
+        let paperCount = 0;
+        let scissorsCount = 0;
+        for (let i = 0; i < totalNPCs; i++) {
+          const idx = i * npcStride;
+          if (updatedData[idx + 5] < 0.5) continue;
+          const t = updatedData[idx + 4];
+          if (t === 0) rockCount++;
+          else if (t === 1) paperCount++;
+          else if (t === 2) scissorsCount++;
+        }
+        document.getElementById("rockCount").textContent = rockCount;
+        document.getElementById("paperCount").textContent = paperCount;
+        document.getElementById("scissorsCount").textContent = scissorsCount;
+
+        // Trails
+        ctx.fillStyle = 'rgba(51,51,51,0.2)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        for (let i = 0; i < totalNPCs; i++) {
+          const idx = i * npcStride;
+          if (updatedData[idx + 5] < 0.5) continue;
+          const x = updatedData[idx];
+          const y = updatedData[idx + 1];
+          const type = updatedData[idx + 4];
+
+          if (type === 0) {
+            ctx.fillStyle = '#fff';
+          } else if (type === 1) {
+            ctx.fillStyle = 'yellow';
+          } else {
+            ctx.fillStyle = 'red';
+          }
+          ctx.fillText(emojiForType[type], x, y);
+        }
+
+        animationFrameId = requestAnimationFrame(frame);
+      }
+
+      frame();
+    }
+
+    function restartSimulation() {
+      simulationActive = false;
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+      }
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      initSimulation(currentNumPerType);
+    }
+
+    initSimulation(currentNumPerType);
+  </script>
+</body>
+</html>
+	
