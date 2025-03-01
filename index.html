@@ -23,6 +23,19 @@
       padding: 10px;
       border-radius: 5px;
     }
+    #winnerBanner {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 80px;
+      font-weight: bold;
+      color: #0f0;
+      text-shadow: 2px 2px #000;
+      display: none;
+      pointer-events: none;
+    }
+    /* Settings toggle & panel */
     #settingsPanel {
       position: absolute;
       top: 10px;
@@ -57,8 +70,10 @@
     <div>📜: <span id="paperCount">0</span></div>
     <div>✂️: <span id="scissorsCount">0</span></div>
   </div>
-
-  <!-- Settings toggle + panel, but now this will generate a link with URL params instead of applying locally. -->
+  <!-- Winner banner -->
+  <div id="winnerBanner"></div>
+  
+  <!-- Settings toggle + panel -->
   <button id="settingsToggle">Settings</button>
   <div id="settingsPanel">
     <label>
@@ -156,7 +171,6 @@
     });
 
     // 4) Start the simulation with the parameters we extracted.
-
     async function initSimulation(numPerType) {
       simulationActive = true;
 
@@ -315,15 +329,15 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
   let deceleration = 0.1;
   if (speed > params.maxSpeed) {
     //npc.vel = (npc.vel / speed) * params.maxSpeed;
-    npc.vel.x = npc.vel.x * (1-deceleration);
-    npc.vel.y = npc.vel.y * (1-deceleration);
+    npc.vel.x = npc.vel.x * (1.0 - deceleration);
+    npc.vel.y = npc.vel.y * (1.0 - deceleration);
   }
 
   // Position
   npc.pos = npc.pos + npc.vel;
 
   // Bouncy walls
-  let bounceMult=5.0;
+  let bounceMult = 5.0;
   if (npc.pos.x < 0.0) {
     npc.pos.x = 0.0;
     npc.vel.x = -npc.vel.x * bounceMult;
@@ -410,8 +424,7 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
               const typeI = updatedData[indexI + 4];
               const typeJ = updatedData[indexJ + 4];
               if (typeI === typeJ) continue;
-              // Rock beats Scissors, Paper beats Rock, Scissors beat Paper
-              // if I beats J, convert J to I
+              // Rock beats Scissors, Paper beats Rock, Scissors beat Paper.
               if ((typeI === 0 && typeJ === 2) ||
                   (typeI === 1 && typeJ === 0) ||
                   (typeI === 2 && typeJ === 1)) {
@@ -425,7 +438,7 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
 
         device.queue.writeBuffer(npcBuffer, 0, updatedData.buffer, updatedData.byteOffset, updatedData.byteLength);
 
-        // Count current types
+        // Count current types.
         let rockCount = 0;
         let paperCount = 0;
         let scissorsCount = 0;
@@ -441,7 +454,7 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
         document.getElementById("paperCount").textContent = paperCount;
         document.getElementById("scissorsCount").textContent = scissorsCount;
 
-        // If trails are enabled, do partial fill, else do a full clear.
+        // If trails are enabled, do partial fill; else do a full clear.
         if (useTrails) {
           ctx.fillStyle = 'rgba(51,51,51,0.2)';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -449,7 +462,7 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
         }
 
-        // Draw all emojis
+        // Draw all emojis.
         for (let i = 0; i < totalNPCs; i++) {
           const idx = i * npcStride;
           if (updatedData[idx + 5] < 0.5) continue;
@@ -467,12 +480,19 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
           ctx.fillText(emojiForType[type], x, y);
         }
 
-        // Single-type check
+        // Single-type check and banner display.
+        const banner = document.getElementById("winnerBanner");
         const typesLeft = [rockCount > 0, paperCount > 0, scissorsCount > 0].filter(Boolean).length;
         if (typesLeft === 1) {
+          let winnerEmoji = "";
+          if (rockCount > 0) winnerEmoji = emojiForType[0];
+          else if (paperCount > 0) winnerEmoji = emojiForType[1];
+          else if (scissorsCount > 0) winnerEmoji = emojiForType[2];
+          banner.textContent = winnerEmoji + " wins!";
+          banner.style.display = "block";
           if (!endTimerId) {
             endTimerId = setTimeout(() => {
-              // Double check.
+              // Double-check if only one type remains.
               const stillOneType = ([rockCount, paperCount, scissorsCount].filter(c => c > 0).length === 1);
               if (stillOneType && simulationActive) {
                 restartSimulation();
@@ -481,6 +501,7 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
             }, 5000);
           }
         } else {
+          banner.style.display = "none";
           if (endTimerId) {
             clearTimeout(endTimerId);
             endTimerId = null;
@@ -494,20 +515,7 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
     }
 
     function restartSimulation() {
-      simulationActive = false;
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-      }
-      const canvas = document.getElementById("canvas");
-      const ctx = canvas.getContext("2d");
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      if (endTimerId) {
-        clearTimeout(endTimerId);
-        endTimerId = null;
-      }
-
-      initSimulation(currentNumPerType);
+      location.reload();
     }
 
     // Finally, start with the parsed settings.
