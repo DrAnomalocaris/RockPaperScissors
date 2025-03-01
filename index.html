@@ -312,27 +312,31 @@ fn main(@builtin(global_invocation_id) global_id : vec3<u32>) {
   // Accelerate
   npc.vel = npc.vel + dir * params.acceleration;
   let speed = sqrt(npc.vel.x * npc.vel.x + npc.vel.y * npc.vel.y);
+  let deceleration = 0.1;
   if (speed > params.maxSpeed) {
-    npc.vel = (npc.vel / speed) * params.maxSpeed;
+    //npc.vel = (npc.vel / speed) * params.maxSpeed;
+    npc.vel.x = npc.vel.x * (1-deceleration);
+    npc.vel.y = npc.vel.y * (1-deceleration);
   }
 
   // Position
   npc.pos = npc.pos + npc.vel;
 
   // Bouncy walls
+  let bounceMult=5.0;
   if (npc.pos.x < 0.0) {
     npc.pos.x = 0.0;
-    npc.vel.x = -npc.vel.x;
+    npc.vel.x = -npc.vel.x * bounceMult;
   } else if (npc.pos.x > params.canvasWidth) {
     npc.pos.x = params.canvasWidth;
-    npc.vel.x = -npc.vel.x;
+    npc.vel.x = -npc.vel.x * bounceMult;
   }
   if (npc.pos.y < 0.0) {
     npc.pos.y = 0.0;
-    npc.vel.y = -npc.vel.y;
+    npc.vel.y = -npc.vel.y * bounceMult;
   } else if (npc.pos.y > params.canvasHeight) {
     npc.pos.y = params.canvasHeight;
-    npc.vel.y = -npc.vel.y;
+    npc.vel.y = -npc.vel.y * bounceMult;
   }
 
   npcs.data[i] = npc;
